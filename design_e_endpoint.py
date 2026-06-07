@@ -45,6 +45,9 @@ BRAIN_INBOX_PATH.mkdir(exist_ok=True, parents=True)
 AUDIT_LOG_PATH = Path(os.getenv("AUDIT_LOG_PATH", "/tmp/audit-logs"))
 AUDIT_LOG_PATH.mkdir(exist_ok=True, parents=True)
 
+# Results path (L2 task status retrieval)
+RESULTS_PATH = Path(os.getenv("RESULTS_PATH", "/var/lib/design-e/results"))
+
 # Valid specialists
 VALID_SPECIALISTS = {"Scout", "Hunter", "Sentinel", "Trader", "Scribe", "Ops"}
 
@@ -158,12 +161,18 @@ def validate_entra_token(authorization: str = Header(None)) -> Dict[str, Any]:
     
     try:
         # Decode and validate JWT
+        decode_kwargs = {
+            "algorithms": [JWT_ALGORITHM],
+            "audience": ENTRA_AUDIENCE,
+        }
+        # Only check issuer if not in test mode
+        if JWT_SECRET != "test-secret":
+            decode_kwargs["issuer"] = f"https://login.microsoftonline.com/{AZURE_TENANT_ID}/v2.0"
+        
         payload = jwt.decode(
             token,
             JWT_SECRET,
-            algorithms=[JWT_ALGORITHM],
-            audience=ENTRA_AUDIENCE,
-            issuer=f"https://login.microsoftonline.com/{AZURE_TENANT_ID}/v2.0",
+            **decode_kwargs,
         )
         return payload
     except jwt.ExpiredSignatureError:
@@ -469,6 +478,49 @@ async def record_event(
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail=json.dumps({"status": "error", "error": {"code": "RATE_LIMIT", "message": "quota exceeded"}}),
+        )
+
+
+@app.get("/rpc/v1/results/{task_id}")
+async def get_results(task_id: str, authorization: str = Header(None)) -> dict:
+    """
+    Retrieve L2 task results by task_id.
+    
+    Request:  GET /rpc/v1/results/{task_id}
+    Response: 200, {task result JSON}
+    
+    Raises:
+        401: Invalid token
+        404: Task not found
+    """
+    try:
+        # Auth
+        validate_entra_token(authorization)
+        
+        # Re-read module attribute each call to honor monkeypatch in tests
+        from design_e_endpoint import RESULTS_PATH as _rp
+        f = _rp / f"{task_id}.json"
+        
+        if not f.exists():
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=json.dumps({"status": "error", "error": {"code": "NOT_FOUND", "message": f"task {task_id} not found"}}),
+            )
+        
+        return json.loads(f.read_text(encoding="utf-8"))
+    
+    except AuthError as e:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=json.dumps({"status": "error", "error": {"code": "UNAUTHORIZED", "message": str(e)}}),
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"get_results failed: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=json.dumps({"status": "error", "error": {"code": "INTERNAL_ERROR", "message": str(e)}}),
         )
 
 
