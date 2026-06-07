@@ -11,6 +11,7 @@ import os
 import json
 import logging
 import uuid
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 from pathlib import Path
@@ -485,9 +486,17 @@ async def get_results(task_id: str, authorization: str = Header(None)) -> dict:
     
     Raises:
         401: Invalid token
+        400: Invalid task_id format (path traversal)
         404: Task not found
     """
     try:
+        # Validate task_id format (syntactic check, safe before auth)
+        if not re.match(r"^[A-Za-z0-9_\-]{1,128}$", task_id):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=json.dumps({"status": "error", "error": {"code": "BAD_REQUEST", "message": "task_id must match ^[A-Za-z0-9_\\-]{1,128}$"}}),
+            )
+        
         # Auth
         validate_entra_token(authorization)
         
@@ -495,13 +504,23 @@ async def get_results(task_id: str, authorization: str = Header(None)) -> dict:
         from design_e_endpoint import RESULTS_PATH as _rp
         f = _rp / f"{task_id}.json"
         
-        if not f.exists():
+        # Belt-and-suspenders: verify path is within RESULTS_PATH
+        if not f.resolve().is_relative_to(_rp.resolve()):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=json.dumps({"status": "error", "error": {"code": "BAD_REQUEST", "message": "task_id must match ^[A-Za-z0-9_\\-]{1,128}$"}}),
+            )
+        
+        # Read file; handle TOCTOU by catching FileNotFoundError from read_text
+        try:
+            body = f.read_text(encoding="utf-8")
+        except FileNotFoundError:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=json.dumps({"status": "error", "error": {"code": "NOT_FOUND", "message": f"task {task_id} not found"}}),
             )
         
-        return json.loads(f.read_text(encoding="utf-8"))
+        return json.loads(body)
     
     except AuthError as e:
         raise HTTPException(

@@ -78,3 +78,64 @@ def test_results_rpc_rejects_unauthenticated(client: TestClient) -> None:
     """Test 9 — missing/invalid auth returns 401."""
     resp = client.get("/rpc/v1/results/any-task-id")
     assert resp.status_code == 401
+
+
+def test_results_rpc_rejects_path_traversal_dotdot(client: TestClient) -> None:
+    """Path traversal with .. — must reject with 400."""
+    tok = _make_token()
+    resp = client.get(
+        "/rpc/v1/results/..%2Fetc%2Fpasswd",
+        headers={"Authorization": f"Bearer {tok}"},
+    )
+    # Either 400 or 404 (route not match) is acceptable, just NOT 500 or 200
+    assert resp.status_code in (400, 404, 422)
+
+
+def test_results_rpc_rejects_invalid_task_id_chars(client: TestClient) -> None:
+    """Invalid chars (spaces) in task_id — must reject with 400."""
+    tok = _make_token()
+    resp = client.get(
+        "/rpc/v1/results/has%20spaces",
+        headers={"Authorization": f"Bearer {tok}"},
+    )
+    assert resp.status_code == 400
+    data = resp.json()
+    assert data["status"] == "error"
+    assert "BAD_REQUEST" in data["error"]["code"]
+
+
+def test_results_rpc_rejects_too_long_task_id(client: TestClient) -> None:
+    """Task_id exceeding 128 chars — must reject with 400."""
+    tok = _make_token()
+    long_task_id = "a" * 129
+    resp = client.get(
+        f"/rpc/v1/results/{long_task_id}",
+        headers={"Authorization": f"Bearer {tok}"},
+    )
+    assert resp.status_code == 400
+    data = resp.json()
+    assert data["status"] == "error"
+    assert "BAD_REQUEST" in data["error"]["code"]
+
+
+def test_results_rpc_accepts_uuid_task_id(
+    client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """UUID-format task_id with corresponding file — must return 200."""
+    results_dir = tmp_path / "results"
+    task_id = "f47ac10b-58cc-4372-a567-0e02b2c3d479"
+    payload = {
+        "task_id": task_id,
+        "specialist": "Scout",
+        "status": "completed",
+        "output": {"result": "ok"},
+    }
+    (results_dir / f"{task_id}.json").write_text(json.dumps(payload), encoding="utf-8")
+    
+    tok = _make_token()
+    resp = client.get(
+        f"/rpc/v1/results/{task_id}",
+        headers={"Authorization": f"Bearer {tok}"},
+    )
+    assert resp.status_code == 200
+    assert resp.json() == payload
