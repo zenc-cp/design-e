@@ -17,12 +17,10 @@ from typing import Any, Dict, List, Optional
 from pathlib import Path
 
 import jwt
-from fastapi import FastAPI, HTTPException, Header, Depends, status
+from fastapi import FastAPI, HTTPException, Header, status
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
-from pydantic import BaseModel, Field, ValidationError
-from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.exceptions import HTTPException as StarletteHTTPException
+from pydantic import BaseModel, Field
 from starlette.requests import Request
 
 # ============================================================================
