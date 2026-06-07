@@ -17,7 +17,12 @@ import design_e_endpoint as dee
 
 def _make_token(secret: str = "test-secret", aud: str = "https://zenops-cloud-dispatch") -> str:
     return jwt.encode(
-        {"sub": "scout", "aud": aud, "tid": "test-tenant-id"},
+        {
+            "sub": "scout",
+            "aud": aud,
+            "tid": "test-tenant-id",
+            "iss": "https://login.microsoftonline.com/test-tenant-id/v2.0",
+        },
         secret,
         algorithm="HS256",
     )

@@ -161,18 +161,12 @@ def validate_entra_token(authorization: str = Header(None)) -> Dict[str, Any]:
     
     try:
         # Decode and validate JWT
-        decode_kwargs = {
-            "algorithms": [JWT_ALGORITHM],
-            "audience": ENTRA_AUDIENCE,
-        }
-        # Only check issuer if not in test mode
-        if JWT_SECRET != "test-secret":
-            decode_kwargs["issuer"] = f"https://login.microsoftonline.com/{AZURE_TENANT_ID}/v2.0"
-        
         payload = jwt.decode(
             token,
             JWT_SECRET,
-            **decode_kwargs,
+            algorithms=[JWT_ALGORITHM],
+            audience=ENTRA_AUDIENCE,
+            issuer=f"https://login.microsoftonline.com/{AZURE_TENANT_ID}/v2.0",
         )
         return payload
     except jwt.ExpiredSignatureError:
