@@ -1,4 +1,4 @@
-﻿# design-e
+# design-e
 
 Thin RPC gateway in front of Hermes for ZenOps `dispatch_specialist` and results retrieval.
 
