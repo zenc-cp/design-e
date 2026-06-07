@@ -1,4 +1,4 @@
-﻿[project]
+[project]
 name = "design-e"
 version = "0.1.0"
 description = "Design E: thin RPC gateway in front of Hermes for ZenOps dispatch_specialist + results retrieval (ADR-025)"

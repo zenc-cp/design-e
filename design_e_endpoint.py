@@ -11,17 +11,16 @@ import os
 import json
 import logging
 import uuid
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 from pathlib import Path
 
 import jwt
-from fastapi import FastAPI, HTTPException, Header, Depends, status
+from fastapi import FastAPI, HTTPException, Header, status
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
-from pydantic import BaseModel, Field, ValidationError
-from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.exceptions import HTTPException as StarletteHTTPException
+from pydantic import BaseModel, Field
 from starlette.requests import Request
 
 # ============================================================================
@@ -44,6 +43,9 @@ BRAIN_INBOX_PATH.mkdir(exist_ok=True, parents=True)
 # Audit log path
 AUDIT_LOG_PATH = Path(os.getenv("AUDIT_LOG_PATH", "/tmp/audit-logs"))
 AUDIT_LOG_PATH.mkdir(exist_ok=True, parents=True)
+
+# Results path (L2 task status retrieval)
+RESULTS_PATH = Path(os.getenv("RESULTS_PATH", "/var/lib/design-e/results"))
 
 # Valid specialists
 VALID_SPECIALISTS = {"Scout", "Hunter", "Sentinel", "Trader", "Scribe", "Ops"}
@@ -469,6 +471,67 @@ async def record_event(
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail=json.dumps({"status": "error", "error": {"code": "RATE_LIMIT", "message": "quota exceeded"}}),
+        )
+
+
+@app.get("/rpc/v1/results/{task_id}")
+async def get_results(task_id: str, authorization: str = Header(None)) -> dict:
+    """
+    Retrieve L2 task results by task_id.
+    
+    Request:  GET /rpc/v1/results/{task_id}
+    Response: 200, {task result JSON}
+    
+    Raises:
+        401: Invalid token
+        400: Invalid task_id format (path traversal)
+        404: Task not found
+    """
+    try:
+        # Validate task_id format (syntactic check, safe before auth)
+        if not re.match(r"^[A-Za-z0-9_\-]{1,128}$", task_id):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=json.dumps({"status": "error", "error": {"code": "BAD_REQUEST", "message": "task_id must match ^[A-Za-z0-9_\\-]{1,128}$"}}),
+            )
+        
+        # Auth
+        validate_entra_token(authorization)
+        
+        # Re-read module attribute each call to honor monkeypatch in tests
+        from design_e_endpoint import RESULTS_PATH as _rp
+        f = _rp / f"{task_id}.json"
+        
+        # Belt-and-suspenders: verify path is within RESULTS_PATH
+        if not f.resolve().is_relative_to(_rp.resolve()):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=json.dumps({"status": "error", "error": {"code": "BAD_REQUEST", "message": "task_id must match ^[A-Za-z0-9_\\-]{1,128}$"}}),
+            )
+        
+        # Read file; handle TOCTOU by catching FileNotFoundError from read_text
+        try:
+            body = f.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=json.dumps({"status": "error", "error": {"code": "NOT_FOUND", "message": f"task {task_id} not found"}}),
+            )
+        
+        return json.loads(body)
+    
+    except AuthError as e:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=json.dumps({"status": "error", "error": {"code": "UNAUTHORIZED", "message": str(e)}}),
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"get_results failed: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=json.dumps({"status": "error", "error": {"code": "INTERNAL_ERROR", "message": str(e)}}),
         )
 
 
