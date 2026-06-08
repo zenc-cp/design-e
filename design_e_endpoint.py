@@ -1,10 +1,11 @@
+"""Design E RPC endpoint for ZenOps.
 """
 Design E RPC Endpoint Implementation (FastAPI)
 
-Scout↔ZenOps dispatch via Entra-authenticated Azure RPC.
+Scout-ZenOps dispatch via Entra-authenticated Azure RPC.
 Implements 3 methods: hermes_ask, dispatch_specialist, record_event.
 
-Reference: design-e-rpc-spec.md (§1–7)
+Reference: design-e-rpc-spec.md (Section 1-7)
 """
 
 import os
