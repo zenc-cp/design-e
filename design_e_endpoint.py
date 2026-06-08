@@ -173,9 +173,13 @@ def validate_entra_token(authorization: str = Header(None)) -> Dict[str, Any]:
         raise AuthError("Token expired")
     except jwt.InvalidAudienceError:
         raise AuthError("Invalid audience")
+    except jwt.InvalidIssuerError:
+        raise AuthError("Invalid issuer")
     except jwt.InvalidSignatureError:
         raise AuthError("Invalid token signature")
     except jwt.DecodeError as e:
+        raise AuthError(f"Invalid token: {e}")
+    except jwt.PyJWTError as e:
         raise AuthError(f"Invalid token: {e}")
 
 
