@@ -1,36 +1,112 @@
 """
 Tests for design_e_endpoint.hermes_ask wired to FoundryHttpTransport (ADR-F).
 
-SKELETON committed pre-Aider to avoid Aider's 0-byte-new-file failure mode
-(see orch-dispatch SKILL.md, anti-pattern gate row 1). Aider will FILL these
-3 tests + the supporting FakeHermesTransport. Skeleton imports are intentionally
-minimal so the file is non-empty but does not yet collect-as-pass.
+The transport seam (`HermesTransport` + module-level `_transport`) lets us inject
+a `FakeHermesTransport` to drive the route end-to-end without touching the
+network. Covers happy-path, timeout, and transport-error.
 
 ADR: session-state/d2ed4d4e-.../files/adr-design-e-hermes-wiring-F.md
 Issue: zenc-cp/design-e#2
 """
 from __future__ import annotations
 
+import httpx
+import jwt
 import pytest
+from fastapi.testclient import TestClient
 
-# Aider: implement the three tests below per ADR-F spec.
-# All three must use FastAPI TestClient + a FakeHermesTransport injected
-# via design_e_endpoint._transport, or respx for outbound httpx mocking.
-
-
-@pytest.mark.skip(reason="Aider to implement per ADR-F")
-def test_hermes_ask_happy_path_returns_llm_answer() -> None:
-    """Happy path: transport.complete returns 'PONG'; response.data.answer == 'PONG'; status 200."""
-    raise NotImplementedError
+import design_e_endpoint as dee
 
 
-@pytest.mark.skip(reason="Aider to implement per ADR-F")
-def test_hermes_ask_timeout_returns_503() -> None:
-    """httpx.TimeoutException from transport -> HTTP 503 with error.code == 'SERVICE_UNAVAILABLE'."""
-    raise NotImplementedError
+def _token(secret: str = "test-secret") -> str:
+    return jwt.encode(
+        {
+            "sub": "scout",
+            "aud": "https://zenops-cloud-dispatch",
+            "tid": "test-tenant-id",
+            "iss": "https://login.microsoftonline.com/test-tenant-id/v2.0",
+        },
+        secret,
+        algorithm="HS256",
+    )
 
 
-@pytest.mark.skip(reason="Aider to implement per ADR-F")
-def test_hermes_ask_transport_error_returns_503() -> None:
-    """httpx.TransportError from transport -> HTTP 503 with error.code == 'SERVICE_UNAVAILABLE'."""
-    raise NotImplementedError
+class FakeHermesTransport:
+    """In-process transport: records calls, returns a canned answer or raises."""
+
+    def __init__(self, *, answer: str | None = None, exc: Exception | None = None) -> None:
+        self._answer = answer
+        self._exc = exc
+        self.calls: list[tuple[str, str]] = []
+
+    async def complete(self, query: str, *, model: str) -> str:
+        self.calls.append((query, model))
+        if self._exc is not None:
+            raise self._exc
+        assert self._answer is not None
+        return self._answer
+
+
+@pytest.fixture
+def client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
+    # Reset the module-level transport singleton so each test gets a clean slate.
+    monkeypatch.setattr(dee, "_transport", None, raising=False)
+    return TestClient(dee.app)
+
+
+def test_hermes_ask_happy_path_returns_llm_answer(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient
+) -> None:
+    fake = FakeHermesTransport(answer="PONG-from-llm")
+    monkeypatch.setattr(dee, "_transport", fake, raising=False)
+
+    resp = client.post(
+        "/rpc/v1/hermes_ask",
+        json={"query": "ping", "context": {"session_id": "s1", "user_id": "u1"}},
+        headers={"Authorization": f"Bearer {_token()}"},
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "ok"
+    assert body["data"]["answer"] == "PONG-from-llm"
+    assert body["data"]["confidence"] == 1.0
+    assert body["data"]["sources"] == []
+    assert "trace_id" in body["data"]
+    assert fake.calls and fake.calls[0][0] == "ping"
+
+
+def test_hermes_ask_timeout_returns_503(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient
+) -> None:
+    fake = FakeHermesTransport(exc=httpx.TimeoutException("timeout"))
+    monkeypatch.setattr(dee, "_transport", fake, raising=False)
+
+    resp = client.post(
+        "/rpc/v1/hermes_ask",
+        json={"query": "ping", "context": {"session_id": "s1", "user_id": "u1"}},
+        headers={"Authorization": f"Bearer {_token()}"},
+    )
+
+    assert resp.status_code == 503
+    body = resp.json()
+    assert body["status"] == "error"
+    assert body["error"]["code"] == "SERVICE_UNAVAILABLE"
+
+
+def test_hermes_ask_transport_error_returns_503(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient
+) -> None:
+    fake = FakeHermesTransport(exc=httpx.TransportError("conn refused"))
+    monkeypatch.setattr(dee, "_transport", fake, raising=False)
+
+    resp = client.post(
+        "/rpc/v1/hermes_ask",
+        json={"query": "ping", "context": {"session_id": "s1", "user_id": "u1"}},
+        headers={"Authorization": f"Bearer {_token()}"},
+    )
+
+    assert resp.status_code == 503
+    body = resp.json()
+    assert body["status"] == "error"
+    assert body["error"]["code"] == "SERVICE_UNAVAILABLE"

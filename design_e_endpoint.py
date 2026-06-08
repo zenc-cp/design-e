@@ -13,9 +13,10 @@ import logging
 import uuid
 import re
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Protocol
 from pathlib import Path
 
+import httpx
 import jwt
 from fastapi import FastAPI, HTTPException, Header, status
 from fastapi.responses import JSONResponse
@@ -361,6 +362,55 @@ async def dispatch_specialist(
         )
 
 
+# ============================================================================
+# HERMES TRANSPORT (ADR-F)
+# ============================================================================
+# `hermes_ask` is a single-shot LLM completion. We call the loopback-only
+# Foundry-compatible inference shim (azure-auth-shim @ 127.0.0.1:8403) by
+# default; the seam allows swapping in a real Hermes-framework transport later
+# without touching the route.
+
+
+class HermesTransport(Protocol):
+    """LLM transport contract for hermes_ask. Implementations must be async."""
+
+    async def complete(self, query: str, *, model: str) -> str: ...
+
+
+class FoundryHttpTransport:
+    """Async httpx client posting OpenAI-format chat completions to the local shim."""
+
+    def __init__(self, base_url: Optional[str] = None, model: Optional[str] = None) -> None:
+        self._base_url = (
+            base_url
+            or os.environ.get("HERMES_FOUNDRY_BASE_URL", "http://127.0.0.1:8403/v1")
+        ).rstrip("/")
+        self._model = model or os.environ.get("HERMES_MODEL", "gpt-5-chat")
+
+    async def complete(self, query: str, *, model: Optional[str] = None) -> str:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                f"{self._base_url}/chat/completions",
+                json={
+                    "model": model or self._model,
+                    "messages": [{"role": "user", "content": query}],
+                },
+            )
+            resp.raise_for_status()
+            return resp.json()["choices"][0]["message"]["content"]
+
+
+_transport: Optional[HermesTransport] = None
+
+
+def get_transport() -> HermesTransport:
+    """Lazily instantiate the default transport. Tests override `_transport` directly."""
+    global _transport
+    if _transport is None:
+        _transport = FoundryHttpTransport()
+    return _transport
+
+
 @app.post("/rpc/v1/hermes_ask", response_model=HermesAskResponse)
 async def hermes_ask(
     request: HermesAskRequest,
@@ -389,13 +439,24 @@ async def hermes_ask(
                 detail=json.dumps({"status": "error", "error": {"code": "BAD_REQUEST", "message": "query exceeds 2000 char limit"}}),
             )
         
-        # For now, return mock response (Hermes integration is future work)
+        # Call the LLM transport (default: local Foundry-compatible shim on 127.0.0.1:8403).
+        # ADR-F: replaces the prior canned mock with a real inference round-trip.
+        transport = get_transport()
+        model = os.environ.get("HERMES_MODEL", "gpt-5-chat")
+        try:
+            answer = await transport.complete(request.query, model=model)
+        except (httpx.TimeoutException, httpx.TransportError) as e:
+            logger.error(f"hermes_ask transport failure: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=json.dumps({"status": "error", "error": {"code": "SERVICE_UNAVAILABLE", "message": "Hermes unavailable"}}),
+            )
         return HermesAskResponse(
             status="ok",
             data={
-                "answer": "This is a mock answer from Hermes.",
-                "confidence": 0.75,
-                "sources": ["source_1", "source_2"],
+                "answer": answer,
+                "confidence": 1.0,
+                "sources": [],
                 "trace_id": str(uuid.uuid4()),
             },
         )
