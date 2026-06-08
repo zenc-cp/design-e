@@ -110,3 +110,35 @@ def test_hermes_ask_transport_error_returns_503(
     body = resp.json()
     assert body["status"] == "error"
     assert body["error"]["code"] == "SERVICE_UNAVAILABLE"
+
+
+def test_hermes_ask_bad_issuer_returns_401(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient
+) -> None:
+    """Regression for #5: bad-issuer JWT must map to 401 UNAUTHORIZED, not 503."""
+    fake = FakeHermesTransport(answer="should-not-be-called")
+    monkeypatch.setattr(dee, "_transport", fake, raising=False)
+
+    bad_iss_token = jwt.encode(
+        {
+            "sub": "scout",
+            "aud": "https://zenops-cloud-dispatch",
+            "tid": "test-tenant-id",
+            "iss": "https://attacker.example.com/v2.0",
+        },
+        "test-secret",
+        algorithm="HS256",
+    )
+
+    resp = client.post(
+        "/rpc/v1/hermes_ask",
+        json={"query": "ping", "context": {"session_id": "s1", "user_id": "u1"}},
+        headers={"Authorization": f"Bearer {bad_iss_token}"},
+    )
+
+    assert resp.status_code == 401
+    body = resp.json()
+    assert body["status"] == "error"
+    assert body["error"]["code"] == "UNAUTHORIZED"
+    assert "issuer" in body["error"]["message"].lower()
+    assert fake.calls == []  # transport must not be called for auth failure
