@@ -1,0 +1,5 @@
+diff a/design_e_endpoint.py b/design_e_endpoint.py	(rejected hunks)
+@@ -0,0 +1,3 @@
++# NO-OP probe for POST-V18 PROBE v3
++# This is a placeholder to acknowledge success=true
++# Baseline test count can be verified using pytest --collect-only
