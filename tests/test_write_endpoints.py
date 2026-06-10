@@ -161,15 +161,10 @@ def test_hermes_ask_rejects_query_too_long(client: TestClient) -> None:
     assert resp.status_code in (400, 422)
 
 
-def test_hermes_ask_happy_path(client: TestClient) -> None:
-    tok = _token()
-    resp = client.post(
-        "/rpc/v1/hermes_ask",
-        json={"query": "hi", "context": {"session_id": "s", "user_id": "u"}},
-        headers={"Authorization": f"Bearer {tok}"},
-    )
-    assert resp.status_code == 200
-    assert resp.json()["status"] == "ok"
+# Happy-path test removed during rebase 2026-06-10 22:58: origin/main wired
+# hermes_ask to a real transport (PR #2/#3); tests/test_hermes_ask.py now
+# covers the happy path with a FakeHermesTransport injection. This file
+# retains only the AUTH/validation tests which don't depend on transport.
 
 
 # ---------------------------------------------------------------------------
