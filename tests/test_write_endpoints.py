@@ -223,7 +223,7 @@ def test_record_event_happy_path_writes_audit(client: TestClient, tmp_path: Path
     audit_files = list((tmp_path / "audit").iterdir())
     assert len(audit_files) == 1
     lines = audit_files[0].read_text(encoding="utf-8").splitlines()
-    entries = [json.loads(l) for l in lines if l.strip()]
+    entries = [json.loads(ln) for ln in lines if ln.strip()]
     assert any(e["task_id"] == "t-happy" and e["event_type"] == "dispatch_completed" for e in entries)
 
 
