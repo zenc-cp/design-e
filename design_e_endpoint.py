@@ -706,7 +706,13 @@ def _read_audit_events(
                 if event_type is not None and entry.get("event_type") != event_type:
                     continue
                 events.append(entry)
-        except OSError:
+        except Exception:
+            # Review BLOCKER fix (2026-06-10 22:50): catch ANY file-level
+            # exception. Pre-fix only caught OSError, which missed
+            # UnicodeDecodeError (invalid UTF-8 from crash-induced corruption)
+            # and MemoryError (pathologically large logs from rotation failure).
+            # Design goal: "one bad FILE must not break the reader" — applies
+            # equally to "one bad LINE must not break the reader" above.
             continue
 
     # Newest-first by timestamp, then cap.

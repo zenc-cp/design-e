@@ -373,3 +373,39 @@ def test_events_reader_survives_deeply_nested_audit_line(client: TestClient, tmp
     # didn't bail out on the bad line.
     assert body["data"]["count"] == 1
     assert body["data"]["events"][0]["task_id"] == "t-after-bad-line"
+
+
+def test_events_reader_survives_invalid_utf8_in_audit_file(client: TestClient, tmp_path: Path) -> None:
+    """Review BLOCKER fix (2026-06-10 22:50): a corrupted audit log file with
+    invalid UTF-8 must not crash the reader. The outer try/except was changed
+    from `except OSError` to `except Exception` to catch UnicodeDecodeError
+    (which is NOT an OSError subclass)."""
+    from datetime import datetime, timezone
+    audit_dir = tmp_path / "audit"
+    today = datetime.now(timezone.utc).strftime("%Y%m%d")
+    yesterday = (datetime.now(timezone.utc) - __import__("datetime").timedelta(days=1)).strftime("%Y%m%d")
+
+    # Today's log has invalid UTF-8 bytes (mid-byte truncation from a crash).
+    (audit_dir / f"audit-{today}.log").write_bytes(b"\x80\x81\x82 garbage\n")
+
+    # Yesterday's log is valid, so the reader should still surface it.
+    valid = json.dumps({
+        "event_type": "dispatch_created",
+        "task_id": "t-from-yesterday",
+        "details": {},
+        "context": {"session_id": "s", "user_id": "u"},
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    })
+    (audit_dir / f"audit-{yesterday}.log").write_text(valid + "\n", encoding="utf-8")
+
+    tok = _token()
+    resp = client.get(
+        "/rpc/v1/events?task_id=t-from-yesterday&lookback_days=2",
+        headers={"Authorization": f"Bearer {tok}"},
+    )
+    assert resp.status_code == 200, (
+        f"reader must not crash on corrupted-UTF8 file; got {resp.status_code}: {resp.text[:200]}"
+    )
+    body = resp.json()
+    assert body["data"]["count"] == 1
+    assert body["data"]["events"][0]["task_id"] == "t-from-yesterday"
