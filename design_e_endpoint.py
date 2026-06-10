@@ -635,6 +635,155 @@ class HermesClient:
 hermes_client = HermesClient()
 
 
+# ============================================================================
+# AUDIT-LOG READER (audit F3 fix, 2026-06-10)
+# ============================================================================
+# ADR-025 audit found a writer (`_record_event_internal` -> audit-YYYYMMDD.log)
+# with no reader. ADR-025 §"Cross-visibility" promised a query surface but
+# nothing consumed the files. This endpoint closes that gap.
+#
+# Implementation: tail the last N days of audit log files, filter by task_id
+# and/or event_type, return newest-first. The audit logs are append-only
+# JSONL; a per-line parse failure does NOT break the response.
+
+_EVENTS_DEFAULT_LOOKBACK_DAYS = 7
+_EVENTS_MAX_LOOKBACK_DAYS = 30
+_EVENTS_MAX_RESULTS = 500
+
+
+def _read_audit_events(
+    *,
+    task_id: Optional[str] = None,
+    event_type: Optional[str] = None,
+    lookback_days: int = _EVENTS_DEFAULT_LOOKBACK_DAYS,
+    limit: int = _EVENTS_MAX_RESULTS,
+) -> List[Dict[str, Any]]:
+    """Read audit log JSONL files filtered by task_id/event_type."""
+    if lookback_days < 1:
+        lookback_days = 1
+    if lookback_days > _EVENTS_MAX_LOOKBACK_DAYS:
+        lookback_days = _EVENTS_MAX_LOOKBACK_DAYS
+    if limit < 1:
+        limit = 1
+    if limit > _EVENTS_MAX_RESULTS:
+        limit = _EVENTS_MAX_RESULTS
+
+    # Re-read module attribute each call to honor monkeypatch in tests.
+    from design_e_endpoint import AUDIT_LOG_PATH as _audit_path
+
+    now = datetime.now(timezone.utc)
+    events: List[Dict[str, Any]] = []
+    # Review WARNING fix (2026-06-10 22:38): cap total raw events read to
+    # bound memory. Without this, a 30-day window with thousands of events
+    # per day would load the entire history before applying limit. We read
+    # newest day first (offset=0 is today), so per-day-truncation preserves
+    # newest-first ordering after the final sort.
+    _read_cap = max(limit * 4, 2000)
+    for offset in range(lookback_days):
+        if len(events) >= _read_cap:
+            break
+        day = now - timedelta(days=offset)
+        log_file = _audit_path / f"audit-{day.strftime('%Y%m%d')}.log"
+        if not log_file.exists():
+            continue
+        try:
+            for line in log_file.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except (json.JSONDecodeError, RecursionError, ValueError):
+                    # Malformed or pathologically nested line — skip but keep
+                    # going. Production audit logs occasionally truncate on
+                    # crash; one bad line must not break the reader.
+                    # Review BLOCKER fix (2026-06-10 22:38): catch RecursionError
+                    # too, since json.loads raises it (not JSONDecodeError) on
+                    # deeply-nested input — would otherwise propagate to a 500.
+                    continue
+                if task_id is not None and entry.get("task_id") != task_id:
+                    continue
+                if event_type is not None and entry.get("event_type") != event_type:
+                    continue
+                events.append(entry)
+        except Exception:
+            # Review BLOCKER fix (2026-06-10 22:50): catch ANY file-level
+            # exception. Pre-fix only caught OSError, which missed
+            # UnicodeDecodeError (invalid UTF-8 from crash-induced corruption)
+            # and MemoryError (pathologically large logs from rotation failure).
+            # Design goal: "one bad FILE must not break the reader" — applies
+            # equally to "one bad LINE must not break the reader" above.
+            continue
+
+    # Newest-first by timestamp, then cap.
+    events.sort(key=lambda e: e.get("timestamp", ""), reverse=True)
+    return events[:limit]
+
+
+@app.get("/rpc/v1/events")
+async def list_events(
+    task_id: Optional[str] = None,
+    event_type: Optional[str] = None,
+    lookback_days: int = _EVENTS_DEFAULT_LOOKBACK_DAYS,
+    limit: int = _EVENTS_MAX_RESULTS,
+    authorization: str = Header(None),
+) -> dict:
+    """
+    Read audit events filtered by task_id and/or event_type.
+
+    Request:  GET /rpc/v1/events?task_id=abc&event_type=dispatch_completed
+              GET /rpc/v1/events?task_id=abc (any event for task)
+              GET /rpc/v1/events?event_type=dispatch_failed (any task)
+    Response: 200, {"status": "ok", "data": {"events": [...], "count": N}}
+
+    Raises:
+        401: Invalid token
+        400: Invalid query params (event_type not in allow-list)
+    """
+    try:
+        # Auth first — no information leak before validation.
+        validate_entra_token(authorization)
+
+        # Validate event_type against allow-list when provided.
+        if event_type is not None and event_type not in VALID_EVENT_TYPES:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=json.dumps({"status": "error", "error": {"code": "BAD_REQUEST", "message": f"invalid event_type: {event_type}"}}),
+            )
+
+        # Validate task_id format when provided (same regex as /results).
+        if task_id is not None and not re.match(r"^[A-Za-z0-9_\-]{1,128}$", task_id):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=json.dumps({"status": "error", "error": {"code": "BAD_REQUEST", "message": "task_id must match ^[A-Za-z0-9_\\-]{1,128}$"}}),
+            )
+
+        events = _read_audit_events(
+            task_id=task_id,
+            event_type=event_type,
+            lookback_days=lookback_days,
+            limit=limit,
+        )
+        return {
+            "status": "ok",
+            "data": {"events": events, "count": len(events)},
+        }
+
+    except AuthError as e:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=json.dumps({"status": "error", "error": {"code": "UNAUTHORIZED", "message": str(e)}}),
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"list_events failed: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=json.dumps({"status": "error", "error": {"code": "INTERNAL_ERROR", "message": str(e)}}),
+        )
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=7890)
