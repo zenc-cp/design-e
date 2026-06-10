@@ -673,7 +673,15 @@ def _read_audit_events(
 
     now = datetime.now(timezone.utc)
     events: List[Dict[str, Any]] = []
+    # Review WARNING fix (2026-06-10 22:38): cap total raw events read to
+    # bound memory. Without this, a 30-day window with thousands of events
+    # per day would load the entire history before applying limit. We read
+    # newest day first (offset=0 is today), so per-day-truncation preserves
+    # newest-first ordering after the final sort.
+    _read_cap = max(limit * 4, 2000)
     for offset in range(lookback_days):
+        if len(events) >= _read_cap:
+            break
         day = now - timedelta(days=offset)
         log_file = _audit_path / f"audit-{day.strftime('%Y%m%d')}.log"
         if not log_file.exists():
@@ -685,10 +693,13 @@ def _read_audit_events(
                     continue
                 try:
                     entry = json.loads(line)
-                except json.JSONDecodeError:
-                    # Malformed line — skip but keep going. Production audit
-                    # logs occasionally truncate on crash; one bad line must
-                    # not break the reader.
+                except (json.JSONDecodeError, RecursionError, ValueError):
+                    # Malformed or pathologically nested line — skip but keep
+                    # going. Production audit logs occasionally truncate on
+                    # crash; one bad line must not break the reader.
+                    # Review BLOCKER fix (2026-06-10 22:38): catch RecursionError
+                    # too, since json.loads raises it (not JSONDecodeError) on
+                    # deeply-nested input — would otherwise propagate to a 500.
                     continue
                 if task_id is not None and entry.get("task_id") != task_id:
                     continue

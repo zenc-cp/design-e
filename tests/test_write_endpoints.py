@@ -330,3 +330,46 @@ def test_events_filter_by_event_type(client: TestClient) -> None:
     body = resp.json()
     assert body["data"]["count"] >= 1
     assert all(e["event_type"] == "dispatch_failed" for e in body["data"]["events"])
+
+
+# ---------------------------------------------------------------------------
+# Review BLOCKER fix (2026-06-10 22:38): a malformed audit-log line with
+# deeply-nested JSON raises RecursionError, not JSONDecodeError. The pre-fix
+# reader caught only JSONDecodeError and would crash the endpoint with 500.
+# ---------------------------------------------------------------------------
+
+
+def test_events_reader_survives_deeply_nested_audit_line(client: TestClient, tmp_path: Path) -> None:
+    """Plant a single audit log line with pathologically nested JSON and
+    confirm the reader skips it instead of crashing with RecursionError."""
+    from datetime import datetime, timezone
+    audit_dir = tmp_path / "audit"
+    today = datetime.now(timezone.utc).strftime("%Y%m%d")
+    log_file = audit_dir / f"audit-{today}.log"
+
+    # 5000 nested arrays — deeper than CPython's default recursion limit.
+    nested = "[" * 5000 + "]" * 5000
+    log_file.write_text(nested + "\n", encoding="utf-8")
+    # Also append one valid line so we can confirm reader continues past the bad one.
+    valid = json.dumps({
+        "event_type": "dispatch_created",
+        "task_id": "t-after-bad-line",
+        "details": {},
+        "context": {"session_id": "s", "user_id": "u"},
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    })
+    log_file.write_text(nested + "\n" + valid + "\n", encoding="utf-8")
+
+    tok = _token()
+    resp = client.get(
+        "/rpc/v1/events?task_id=t-after-bad-line",
+        headers={"Authorization": f"Bearer {tok}"},
+    )
+    assert resp.status_code == 200, (
+        f"reader must not crash on deeply-nested JSON line; got {resp.status_code}: {resp.text[:200]}"
+    )
+    body = resp.json()
+    # The valid line should be returned (count >= 1), proving the reader
+    # didn't bail out on the bad line.
+    assert body["data"]["count"] == 1
+    assert body["data"]["events"][0]["task_id"] == "t-after-bad-line"
