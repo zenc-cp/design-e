@@ -139,3 +139,41 @@ def test_results_rpc_accepts_uuid_task_id(
     )
     assert resp.status_code == 200
     assert resp.json() == payload
+
+
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Audit follow-ups (design-e#8 F9, design-e#9 F10) -- defense-in-depth
+# ---------------------------------------------------------------------------
+
+
+def test_results_rpc_malformed_task_id_without_auth_returns_401(client: TestClient) -> None:
+    """F9 / design-e#8: unauthenticated callers must get 401 regardless of
+    task_id shape, so attackers cannot distinguish well-formed from malformed
+    task_ids before auth."""
+    resp = client.get("/rpc/v1/results/has spaces")
+    assert resp.status_code == 401
+
+
+def test_results_rpc_500_does_not_leak_exception_text(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F10 / design-e#9: a 500 must NOT echo str(exception) -- sensitive
+    detail (paths, IPs, partial secrets) must stay server-side."""
+    def boom(*_a, **_kw):
+        raise RuntimeError("secret-value /etc/shadow 10.0.0.7")
+
+    monkeypatch.setattr(dee, "validate_entra_token", boom)
+    tok = _make_token()
+    resp = client.get(
+        "/rpc/v1/results/valid-task-id",
+        headers={"Authorization": f"Bearer {tok}"},
+    )
+    assert resp.status_code == 500
+    body = resp.text
+    assert "secret-value" not in body
+    assert "/etc/shadow" not in body
+    assert "10.0.0.7" not in body
+    data = resp.json()
+    assert data["error"]["message"] == "internal_error"

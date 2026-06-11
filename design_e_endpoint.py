@@ -359,10 +359,13 @@ async def dispatch_specialist(
             headers={"X-RateLimit-Reset": str(reset_time)},
         )
     except Exception as e:
+        # Audit F10 / design-e#9: do NOT echo str(e) to caller — internal
+        # exceptions may contain paths, IPs, or partial secrets. Log full
+        # detail server-side and return a generic message.
         logger.error(f"dispatch_specialist failed: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=json.dumps({"status": "error", "error": {"code": "INTERNAL_ERROR", "message": str(e)}}),
+            detail=json.dumps({"status": "error", "error": {"code": "INTERNAL_ERROR", "message": "internal_error"}}),
         )
 
 
@@ -553,15 +556,18 @@ async def get_results(task_id: str, authorization: str = Header(None)) -> dict:
         404: Task not found
     """
     try:
-        # Validate task_id format (syntactic check, safe before auth)
+        # Auth FIRST (audit F9 / design-e#8): validating format before auth
+        # leaks "well-formed vs malformed task_id" to unauthenticated callers.
+        # Defense-in-depth: an unauthenticated caller must always see 401,
+        # regardless of task_id shape.
+        validate_entra_token(authorization)
+
+        # Validate task_id format (syntactic check)
         if not re.match(r"^[A-Za-z0-9_\-]{1,128}$", task_id):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=json.dumps({"status": "error", "error": {"code": "BAD_REQUEST", "message": "task_id must match ^[A-Za-z0-9_\\-]{1,128}$"}}),
             )
-        
-        # Auth
-        validate_entra_token(authorization)
         
         # Re-read module attribute each call to honor monkeypatch in tests
         from design_e_endpoint import RESULTS_PATH as _rp
@@ -593,10 +599,11 @@ async def get_results(task_id: str, authorization: str = Header(None)) -> dict:
     except HTTPException:
         raise
     except Exception as e:
+        # Audit F10 / design-e#9: do NOT echo str(e) to caller.
         logger.error(f"get_results failed: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=json.dumps({"status": "error", "error": {"code": "INTERNAL_ERROR", "message": str(e)}}),
+            detail=json.dumps({"status": "error", "error": {"code": "INTERNAL_ERROR", "message": "internal_error"}}),
         )
 
 
