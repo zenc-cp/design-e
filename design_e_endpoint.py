@@ -329,6 +329,18 @@ async def dispatch_specialist(
             details={"outcome": "success", "latency_ms": 10},
             context=request.context,
         )
+
+        # ADR-032: observability sink (best-effort; never breaks request path)
+        try:
+            import observability
+            observability.emit(
+                task_id,
+                "design-e",
+                "dispatched",
+                {"specialist": request.specialist, "ttl_sec": request.task.ttl_sec},
+            )
+        except Exception:
+            pass
         
         return DispatchSpecialistResponse(
             status="ok",
@@ -588,7 +600,14 @@ async def get_results(task_id: str, authorization: str = Header(None)) -> dict:
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=json.dumps({"status": "error", "error": {"code": "NOT_FOUND", "message": f"task {task_id} not found"}}),
             )
-        
+
+        # ADR-032: observability sink (best-effort)
+        try:
+            import observability
+            observability.emit(task_id, "design-e", "result_read")
+        except Exception:
+            pass
+
         return json.loads(body)
     
     except AuthError as e:
